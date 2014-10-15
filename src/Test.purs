@@ -5,6 +5,8 @@ import Control.Monad.Eff
 import Control.Monad.Eff.Random
 import Debug.Trace
 import Data.Either
+import Data.Monoid
+import Data.Foldable
 import Signal
 
 import Node.Thunk
@@ -29,6 +31,19 @@ printHi :: forall i r. i -> Eff (trace :: Debug.Trace.Trace | r) Unit
 printHi _ = print "Hi"
 
 type Time = Number
+
+-- Returns a "clone" signal containing the value of the original signal.
+-- Does not copy any of the subs etc, just the value.
+-- Can be used for creating an "initial" signal to concat other signals.
+foreign import cloneSigValP """
+    function cloneSigValP(constant) {
+        return function (origSig) {
+            return constant(origSig.get());
+        }
+    }
+""" :: forall c. (c -> Signal c) -> Signal c -> Signal c
+
+cloneSigVal = cloneSigValP constant
 
 foreign import everyP """
     function everyP(constant) {
@@ -101,6 +116,8 @@ foreign import xmppClient """
 type User = String
 type MessageText = String
 
+foreign import data SendXmpp :: !
+
 foreign import sendChat """
     function sendChat(client) {
         return function (user) {
@@ -121,7 +138,7 @@ foreign import sendChat """
             }
         }}
     }
-""" :: forall r. XmppClient -> User -> MessageText -> Eff (r) Unit
+""" :: forall r. XmppClient -> User -> MessageText -> Eff (chat :: SendXmpp | r) Unit
 
 -- foreign import data Stanza :: *
 
@@ -133,6 +150,17 @@ data Stanza = ChatMessage User User MessageText
             | ComposingStopped User
             | OtherMessage User User
             | UnknownStanza
+
+
+foreign import data NoOp :: !
+
+foreign import noop """
+    function noop() {}
+""" :: forall e. Eff (noop :: NoOp | e) Unit
+
+instance monoidSignal :: (Monoid m) => Monoid (Signal m) where
+    mempty = constant (mempty)
+
 
 foreign import stanzaParserP """
     function stanzaParserP(ChatMessage) {
@@ -205,14 +233,36 @@ messagesSignal = filterSignal isChatMessage
 
 params = { jid: "bot@rolepoint.com", password: "test", "host": "localhost", reconnect: true }
 
-takeActions :: forall r. XmppClient -> Stanza -> Eff (trace ::Debug.Trace.Trace | r) Unit
-takeActions client (ChatMessage _ from message) = do
+
+echoWhatDoYouMean :: XmppClient -> Stanza -> Eff (trace ::Debug.Trace.Trace, chat :: SendXmpp, noop :: NoOp) Unit
+echoWhatDoYouMean client (ChatMessage _ from message) = do
     sendChat client from ("What do you mean '" ++ message ++ "'?")
-takeActions client _ = do
+echoWhatDoYouMean client _ = do
     print "WUT"
+
 
 -- TODO: Basically I need to lift my "action" functions in to the signals.
 --       Then merge those signals using SemiGroup.
+
+
+type ActionFunc = forall r. (XmppClient -> Stanza -> Eff (noop :: NoOp, chat :: SendXmpp, trace :: Debug.Trace.Trace) Unit)
+
+--takeActions :: forall r. XmppClient -> [ActionFunc] -> Signal Stanza -> Signal (Eff (noop :: NoOp, chat :: SendXmpp, trace :: Debug.Trace.Trace | r) Unit)
+takeActions :: XmppClient -> [ActionFunc] -> Signal Stanza -> Signal (Eff (noop :: NoOp, chat :: SendXmpp, trace :: Debug.Trace.Trace) Unit)
+takeActions client actionFuncs signal =
+    -- TODO: so, need to generate signals that lift ActionFunc into Signal Stanza.
+    --       Then need to concat them with <>
+    foldr merge initialSignal resultSignals
+      where appliedActionFuncs = (\func -> func client) <$> actionFuncs
+            resultSignals = (liftSignal signal) <$> appliedActionFuncs
+            initialSignal = constant noop
+
+-- Lifts a function into a signal.
+liftSignal :: forall a r.  Signal a -> (a -> r) -> Signal r
+liftSignal signal func = func <$> signal
+
+--applyActionFuncs :: forall r. XmppClient -> [ActionFunc] -> [(Stanza -> Eff r Unit)]
+--applyActionFuncs client funcs = (\func -> func client) <$> funcs
 
 main =
     let client = xmppClient params
@@ -220,4 +270,5 @@ main =
         messages = messagesSignal stanzas in
         do
             runSignal $ messages ~> printMessages
-            runSignal $ messages ~> takeActions client
+            runSignal $ (takeActions client [echoWhatDoYouMean] messages)
+            runSignal $ (merge (constant noop) (constant (print "Hi")))
