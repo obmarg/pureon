@@ -1,3 +1,7 @@
+-- Signal module, copied from https://github.com/bodil/purescript-signal
+--
+--  Will add as a dependency at some point probably, just copied for speed.
+--
 module Signal
   ( Signal(..)
   , constant

@@ -2,7 +2,6 @@ module Main where
 
 import Prelude
 import Control.Monad.Eff
-import Control.Monad.Eff.Random
 import Debug.Trace
 import Data.Either
 import Data.Monoid
@@ -10,6 +9,10 @@ import Data.Foldable
 import Signal
 
 import Node.Thunk
+
+import Xmpp
+import HubotInterface
+import Actions
 
 foreign import fs "var fs = require('fs');" :: {
   readFile :: ThunkFn1 String String
@@ -80,88 +83,6 @@ foreign import filterSignalP """
 filterSignal = filterSignalP constant
 removeSignal predicate = filterSignal (predicate >>> not)
 
--- TODO: Need to define a foreign fn that takes
--- parameters and returns a client.
---
--- Then need to convert that to a "stanza" stream.
--- Can then further filter that.
---
--- Also have a foreign "Send" function that
--- returns an Eff.
-
-foreign import data XmppClient :: *
-
-foreign import xmppClient """
-    function xmppClient(args) {
-        var Client = require('node-xmpp-client'),
-            ltx = require('ltx'),
-            client = new Client(args);
-
-        client.on('online', function(){
-            console.log('online');
-
-            client.send(
-                new ltx.Element('presence', { })
-                    .c('show').t('chat').up()
-                    .c('status').t('WOO')
-            );
-
-        });
-        client.on('error', function(){console.log('error')});
-        client.on('disconnect', function(){console.log('disconnect')});
-        return client;
-    }
-""" :: forall c. c -> XmppClient
-
-type User = String
-type MessageText = String
-
-foreign import data SendXmpp :: !
-
-foreign import sendChat """
-    function sendChat(client) {
-        return function (user) {
-        return function (message) {
-            return function () {
-                var ltx = require('ltx'),
-                    messageElement = new ltx.Element(
-                        'message',
-                        {'to': user,
-                         'from': 'bot@rolepoint.com',
-                         'type': 'chat'}
-                    );
-                messageElement.c('body').t(message);
-                // TODO: All the examples do the sending in a setTimeout.  MIGHT need to do something like that if the Eff stuff doesn't delay enough already.
-
-                console.log('blah');
-                client.send(messageElement);
-            }
-        }}
-    }
-""" :: forall r. XmppClient -> User -> MessageText -> Eff (chat :: SendXmpp | r) Unit
-
--- foreign import data Stanza :: *
-
--- TODO: Need a better type definition of a stanza.
---       Probably a union type Message | Unknown
-
-data Stanza = ChatMessage User User MessageText
-            | ComposingStarted User
-            | ComposingStopped User
-            | OtherMessage User User
-            | UnknownStanza
-
-
-foreign import data NoOp :: !
-
-foreign import noop """
-    function noop() {}
-""" :: forall e. Eff (noop :: NoOp | e) Unit
-
-instance monoidSignal :: (Monoid m) => Monoid (Signal m) where
-    mempty = constant (mempty)
-
-
 foreign import stanzaParserP """
     function stanzaParserP(ChatMessage) {
         return function (ComposingStarted) {
@@ -203,7 +124,6 @@ foreign import stanzaSignalP """
         return function (stanzaParser) {
         return function (UnknownStanza) {
         return function (xmppClient) {
-            // TODO: {} isn't a valid stanza...
             var out = constant(UnknownStanza);
             var util = require('util');
 
@@ -234,41 +154,21 @@ messagesSignal = filterSignal isChatMessage
 params = { jid: "bot@rolepoint.com", password: "test", "host": "localhost", reconnect: true }
 
 
-echoWhatDoYouMean :: XmppClient -> Stanza -> Eff (trace ::Debug.Trace.Trace, chat :: SendXmpp, noop :: NoOp) Unit
+echoWhatDoYouMean :: XmppClient -> Stanza -> Eff (trace ::Debug.Trace.Trace, chat :: SendXmpp) Unit
 echoWhatDoYouMean client (ChatMessage _ from message) = do
     sendChat client from ("What do you mean '" ++ message ++ "'?")
 echoWhatDoYouMean client _ = do
     print "WUT"
 
 
--- TODO: Basically I need to lift my "action" functions in to the signals.
---       Then merge those signals using SemiGroup.
-
-
-type ActionFunc = forall r. (XmppClient -> Stanza -> Eff (noop :: NoOp, chat :: SendXmpp, trace :: Debug.Trace.Trace) Unit)
-
---takeActions :: forall r. XmppClient -> [ActionFunc] -> Signal Stanza -> Signal (Eff (noop :: NoOp, chat :: SendXmpp, trace :: Debug.Trace.Trace | r) Unit)
-takeActions :: XmppClient -> [ActionFunc] -> Signal Stanza -> Signal (Eff (noop :: NoOp, chat :: SendXmpp, trace :: Debug.Trace.Trace) Unit)
-takeActions client actionFuncs signal =
-    -- TODO: so, need to generate signals that lift ActionFunc into Signal Stanza.
-    --       Then need to concat them with <>
-    foldr merge initialSignal resultSignals
-      where appliedActionFuncs = (\func -> func client) <$> actionFuncs
-            resultSignals = (liftSignal signal) <$> appliedActionFuncs
-            initialSignal = constant noop
-
--- Lifts a function into a signal.
-liftSignal :: forall a r.  Signal a -> (a -> r) -> Signal r
-liftSignal signal func = func <$> signal
-
---applyActionFuncs :: forall r. XmppClient -> [ActionFunc] -> [(Stanza -> Eff r Unit)]
---applyActionFuncs client funcs = (\func -> func client) <$> funcs
-
 main =
     let client = xmppClient params
         stanzas = stanzaSignal client
-        messages = messagesSignal stanzas in
+        messages = messagesSignal stanzas
+        actionsSignal = getActionFuncs "hubot-thank-you" in
+        -- TODO: need a way to merge signals of lists if there isn't one already
         do
             runSignal $ messages ~> printMessages
-            runSignal $ (takeActions client [echoWhatDoYouMean] messages)
-            runSignal $ (merge (constant noop) (constant (print "Hi")))
+            --runSignal $ (takeActions client [echoWhatDoYouMean] messages)
+            --runSignal $ (takeActions client (getActionFuncs "hubot-thank-you") messages)
+            runSignal $ (takeActions client <$> actionsSignal <*> messages)
