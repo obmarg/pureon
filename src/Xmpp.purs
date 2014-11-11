@@ -1,6 +1,7 @@
 module Xmpp where
 
 import Control.Monad.Eff
+import Signal
 
 foreign import data XmppClient :: *
 
@@ -26,6 +27,62 @@ foreign import xmppClient """
     }
 """ :: forall c. c -> XmppClient
 
+
+foreign import stanzaParser' """
+    function stanzaParser$prime(ChatMessage) {
+        return function (ComposingStarted) {
+        return function (ComposingStopped) {
+        return function (OtherMessage) {
+        return function (UnknownStanza) {
+            return function(stanza) {
+                if (stanza.is('message') && stanza.attrs.type === 'chat') {
+                    var body = stanza.getChild('body'),
+                        composing = stanza.getChild('composing'),
+                        paused = stanza.getChild('paused');
+
+                    if ( body ) {
+                        return new ChatMessage(stanza.attrs.to)(stanza.attrs.from)(stanza.getChildText('body'));
+                    }
+
+                    if ( composing ) {
+                        return new ComposingStarted(stanza.attrs.from);
+                    }
+
+                    if ( paused ) {
+                        return new ComposingStopped(stanza.attrs.from);
+                    }
+
+                    return new OtherMessage(stanza.attrs.to)(stanza.attrs.from);
+                } else {
+                    return UnknownStanza;
+                }
+            }
+        }}}}
+    }
+""" :: forall a b c d e f. a -> b -> c -> d -> e -> f -> Stanza
+
+stanzaParser = stanzaParser' ChatMessage ComposingStarted ComposingStopped OtherMessage UnknownStanza
+
+
+foreign import stanzaSignal' """
+    function stanzaSignal$prime(constant) {
+        return function (stanzaParser) {
+        return function (UnknownStanza) {
+        return function (xmppClient) {
+            var out = constant(UnknownStanza);
+            var util = require('util');
+
+            xmppClient.on('stanza', function(stanza){
+                //console.log(util.inspect(stanza, {'depth': 6}));
+                out.set(stanzaParser(stanza));
+            });
+
+            return out;
+        }}}
+    }
+""" :: forall c x y. (c -> Signal c) -> (x -> Stanza) -> y -> XmppClient -> Signal Stanza
+
+stanzaSignal = stanzaSignal' constant stanzaParser UnknownStanza
 
 foreign import data SendXmpp :: !
 
