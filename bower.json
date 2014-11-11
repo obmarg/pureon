@@ -21,6 +21,7 @@
     "purescript-either": "~0.1.3",
     "purescript-monoid": "~0.1.4",
     "purescript-strings": "4e7f0d5419e283229d8a686421b46c896de668d1",
-    "purescript-maybe": "~0.2.1"
+    "purescript-maybe": "~0.2.1",
+    "purescript-signal": "~1.2.0"
   }
 }
